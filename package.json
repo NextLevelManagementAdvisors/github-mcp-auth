@@ -1,0 +1,28 @@
+{
+  "name": "github-mcp-auth",
+  "version": "0.1.0",
+  "description": "Multi-tenant OAuth 2.1 gateway in front of github-mcp-server. Each claude.ai user authorizes with GitHub OAuth and acts as themselves on the GitHub API.",
+  "type": "module",
+  "bin": {
+    "github-mcp-auth": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc --watch",
+    "deploy": "bash scripts/push-to-vps.sh"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.10.1",
+    "dotenv": "^16.4.5",
+    "express": "^5.0.1",
+    "http-proxy-middleware": "^3.0.3",
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.10.2",
+    "@types/pg": "^8.11.10",
+    "typescript": "^5.7.2"
+  }
+}

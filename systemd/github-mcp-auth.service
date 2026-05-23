@@ -1,0 +1,18 @@
+[Unit]
+Description=github-mcp-auth — multi-tenant OAuth gateway for github-mcp-server
+After=network-online.target docker.service postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/github-mcp-auth
+EnvironmentFile=/opt/github-mcp-auth/.env
+ExecStart=/usr/bin/node dist/index.js
+Restart=on-failure
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
