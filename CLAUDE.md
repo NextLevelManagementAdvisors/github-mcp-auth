@@ -55,4 +55,4 @@ All required env vars are validated at startup in [src/index.ts](src/index.ts):
 - `API_KEY_HASH_SALT` — ≥32 chars random; drives both the token-encryption HKDF key and the tenant-id-hash salt. **Rotating this orphans every stored GitHub token**.
 - `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` — from the GitHub OAuth App.
 - `BASE_URL` — `https://github.nlma.io` in prod. Used for OAuth metadata issuer and the GitHub callback URL.
-- `GITHUB_SCOPES` (default `repo,read:org,read:user,read:project`), `UPSTREAM_MCP_URL` (default `http://127.0.0.1:3060`), `GITHUB_ALLOWED_USERS` (optional CSV allowlist).
+- `GITHUB_SCOPES` (default `repo,read:org,read:user,read:project,workflow`), `UPSTREAM_MCP_URL` (default `http://127.0.0.1:3060`), `GITHUB_ALLOWED_USERS` (optional CSV allowlist).

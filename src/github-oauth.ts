@@ -14,7 +14,7 @@ function getEnv(name: string): string {
 }
 
 export function getGithubScopes(): string[] {
-  const raw = process.env.GITHUB_SCOPES ?? "repo,read:org,read:user,read:project";
+  const raw = process.env.GITHUB_SCOPES ?? "repo,read:org,read:user,read:project,workflow";
   return raw
     .split(",")
     .map((s) => s.trim())
