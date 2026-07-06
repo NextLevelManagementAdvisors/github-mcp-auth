@@ -40,7 +40,7 @@ Copy `.env.example` to `.env` and fill in. Required:
 | `GITHUB_CLIENT_ID`       | From the GitHub OAuth App you register (see below).                                                   |
 | `GITHUB_CLIENT_SECRET`   | Same. Treat as secret. `.env` should be `chmod 600`.                                                   |
 | `BASE_URL`               | `https://github.nlma.io`                                                                               |
-| `GITHUB_SCOPES`          | Default `repo,read:org,read:user,read:project`. Bump if a tool needs more.                            |
+| `GITHUB_SCOPES`          | Default `repo,read:org,read:user,read:project,workflow`. `workflow` is required to create/update `.github/workflows/*` files. Bump if a tool needs more. |
 | `UPSTREAM_MCP_URL`       | Default `http://127.0.0.1:3060` — the github-mcp-server docker container.                              |
 | `GITHUB_ALLOWED_USERS`   | Optional CSV allowlist of GitHub logins. Empty = anyone with a GitHub account.                         |
 
