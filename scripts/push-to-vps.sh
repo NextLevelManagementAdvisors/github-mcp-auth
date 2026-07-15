@@ -7,12 +7,12 @@ set -euo pipefail
 # Usage:  scripts/push-to-vps.sh
 #
 # Assumes:
-#   - ssh root@178.16.141.166 works without a password prompt
+#   - ssh root@YOUR_SERVER_IP works without a password prompt
 #   - /opt/github-mcp-auth/.env already exists on the VPS (not overwritten)
 #   - github-mcp-auth.service is installed (see scripts/install-on-vps.sh)
 #   - Postgres database `github_mcp` exists and DATABASE_URL in .env points at it
 
-HOST=root@178.16.141.166
+HOST=root@YOUR_SERVER_IP
 REMOTE=/opt/github-mcp-auth
 SERVICE=github-mcp-auth
 

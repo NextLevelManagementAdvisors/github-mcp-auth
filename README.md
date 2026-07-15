@@ -129,3 +129,10 @@ See `migrations/001_initial.sql` + `migrations/002_oauth.sql`. Notable tables:
 - `tenants.tenant_id_hash` is a salted SHA-256 of the GitHub user id, so audit logs don't directly expose user ids.
 - `GITHUB_ALLOWED_USERS` provides a deny-by-default mode while testing.
 - Revoke a user: `DELETE FROM github_users WHERE github_login = '...'` cascades effectively (their opaque tokens won't resolve, and proxy requests will 401).
+## License
+
+Copyright © 2026 Next Level Management Advisors, LLC.
+
+Licensed under the **GNU Affero General Public License v3.0** (AGPL-3.0) — see [LICENSE](LICENSE). If you run a modified version over a network, the AGPL requires you to make your modified source available to its users.
+
+**Commercial licensing:** to use this in a closed-source or commercial product, or to host a modified version without publishing your source, a commercial license is available — contact **forrest@nlma.io**.
