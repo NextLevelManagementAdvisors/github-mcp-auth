@@ -24,6 +24,21 @@ claude.ai ──OAuth 2.1 (PKCE, DCR)──> https://github.nlma.io (nginx)
 
 `github-mcp-server` itself is unchanged; it just sees a normal authenticated request with a per-user GitHub token.
 
+## Turning a connector off
+
+Users offboard themselves — no admin and no SQL. Two entry points, both proving control of the GitHub account whose credentials get deleted:
+
+- **Browser** — `GET /disconnect` explains what will be deleted; the button posts to `/disconnect/start`, which sends the user through GitHub and back to `/oauth/github/callback`. Linked from the splash page.
+- **API** — `POST /disconnect` with the bearer token the MCP client already holds:
+
+  ```bash
+  curl -X POST https://github.nlma.io/disconnect -H 'Authorization: Bearer <access_token>'
+  ```
+
+Either path deletes every opaque access/refresh token issued for that user, any in-flight auth code, their encrypted GitHub credentials, and their `tenants` row — then revokes the OAuth App grant on GitHub's side so the connector is genuinely off rather than merely forgotten locally (best-effort; the response reports whether GitHub confirmed). `audit_log` rows are kept: they identify the user only by a salted hash, and an audit trail the product can erase isn't one.
+
+Offboarding deliberately does **not** re-check `GITHUB_APPROVED_EMAIL_DOMAINS`. That gate decides who may *connect*; applying it to disconnection would mean dropping a domain from the allowlist strands its users with a connector they can no longer turn off. Any GitHub account that has connected here can disconnect itself — and only itself.
+
 ## Why this pattern (and not JWT RS256 / Authentik)
 
 - **Opaque tokens, not JWT.** Matches the existing `mcpAuthRouter` pattern in `hospitable-mcp` and `skillbuilder-mcp` on this VPS. Simpler revocation, no JWKS to publish or rotate.
@@ -40,9 +55,16 @@ Copy `.env.example` to `.env` and fill in. Required:
 | `GITHUB_CLIENT_ID`       | From the GitHub OAuth App you register (see below).                                                   |
 | `GITHUB_CLIENT_SECRET`   | Same. Treat as secret. `.env` should be `chmod 600`.                                                   |
 | `BASE_URL`               | `https://github.nlma.io`                                                                               |
-| `GITHUB_SCOPES`          | Default `repo,read:org,read:user,read:project,workflow`. `workflow` is required to create/update `.github/workflows/*` files. Bump if a tool needs more. |
+| `GITHUB_SCOPES`          | Default `repo,read:org,read:user,user:email,read:project,workflow`. `workflow` is required to create/update `.github/workflows/*` files; `user:email` is required to read verified emails for `GITHUB_APPROVED_EMAIL_DOMAINS`. Bump if a tool needs more. |
 | `UPSTREAM_MCP_URL`       | Default `http://127.0.0.1:3060` — the github-mcp-server docker container.                              |
-| `GITHUB_ALLOWED_USERS`   | Optional CSV allowlist of GitHub logins. Empty = anyone with a GitHub account.                         |
+| `GITHUB_ALLOWED_USERS`   | Optional CSV allowlist of GitHub logins. Empty = no login gate.                                        |
+| `GITHUB_APPROVED_EMAIL_DOMAINS` | Optional CSV of approved email domains, e.g. `nlma.io,fidumcompany.com,fsbt.io`. A user is admitted when one of their **verified** GitHub emails is on an approved domain (subdomains count: `nlma.io` admits `me@mail.nlma.io`). Empty = no domain gate. |
+
+### How the two allowlists compose
+
+Either one admits a user — they're OR'd, not AND'd. `GITHUB_ALLOWED_USERS` is for named individuals (contractors, a break-glass account); `GITHUB_APPROVED_EMAIL_DOMAINS` is for "everyone at these companies". With both empty, anyone with a GitHub account can authorize, as before.
+
+Only **verified** GitHub emails count toward a domain match — an unverified address proves nothing, since anyone can type `someone@your-company.com` into their GitHub profile. If a domain gate is configured and the grant can't read email addresses at all (missing `user:email`), authorization **fails closed** and tells the user to re-authorize.
 
 ## Deployment
 
@@ -112,23 +134,31 @@ curl -s https://github.nlma.io/health
 # Without a bearer, /mcp must 401 with a WWW-Authenticate header
 curl -i https://github.nlma.io/mcp -X POST -H 'Content-Type: application/json' \
      -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
+
+# Offboarding: the page renders, and the form target 302s to github.com
+curl -s https://github.nlma.io/disconnect | grep -o '/disconnect/start'
+curl -si -X POST https://github.nlma.io/disconnect/start | grep -i '^location'
+
+# Without a bearer, POST /disconnect must 401 (never a silent no-op)
+curl -si -X POST https://github.nlma.io/disconnect | head -1
 ```
 
 ## Schema
 
-See `migrations/001_initial.sql` + `migrations/002_oauth.sql`. Notable tables:
+See `migrations/001_initial.sql`, `002_oauth.sql`, `003_offboarding.sql`. Notable tables:
 
-- `github_users` — one row per GitHub user we've ever authenticated. Holds the encrypted access (and refresh) tokens.
+- `github_users` — one row per GitHub user we've ever authenticated. Holds the encrypted access (and refresh) tokens, plus the verified `email` that admitted them.
 - `oauth_access_tokens` — opaque tokens issued to claude.ai. Points at `github_users.github_user_id`.
-- `oauth_pending_state` — short-lived rows for in-flight GitHub OAuth dances; carries the claude.ai PKCE challenge across the GitHub redirect.
+- `oauth_pending_state` — short-lived rows for in-flight GitHub OAuth dances; carries the claude.ai PKCE challenge across the GitHub redirect. `purpose` is `authorize` or `disconnect`; a `disconnect` row has no client/PKCE columns because there's no MCP client on the other side.
 
 ## Security notes
 
 - GitHub tokens are AES-256-GCM-encrypted at rest. Key is HKDF-derived from `API_KEY_HASH_SALT` with a distinct info label.
 - Tokens issued to claude.ai are opaque UUIDs; nothing about the GitHub user is recoverable from them without the database.
 - `tenants.tenant_id_hash` is a salted SHA-256 of the GitHub user id, so audit logs don't directly expose user ids.
-- `GITHUB_ALLOWED_USERS` provides a deny-by-default mode while testing.
-- Revoke a user: `DELETE FROM github_users WHERE github_login = '...'` cascades effectively (their opaque tokens won't resolve, and proxy requests will 401).
+- `GITHUB_ALLOWED_USERS` and `GITHUB_APPROVED_EMAIL_DOMAINS` provide deny-by-default modes; only verified GitHub emails satisfy the domain gate, and a configured domain gate fails closed when emails can't be read.
+- Users can revoke themselves — see [Turning a connector off](#turning-a-connector-off).
+- Revoke a user as admin: `DELETE FROM github_users WHERE github_login = '...'` cascades effectively (their opaque tokens won't resolve, and proxy requests will 401). Unlike `/disconnect`, this leaves the OAuth App grant in place on GitHub's side.
 ## License
 
 Copyright © 2026 Next Level Management Advisors, LLC.

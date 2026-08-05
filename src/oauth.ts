@@ -114,7 +114,8 @@ export const oauthProvider: OAuthServerProvider = {
       params.redirectUri,
       params.codeChallenge,
       params.state,
-      Date.now() + PENDING_STATE_TTL_MS
+      Date.now() + PENDING_STATE_TTL_MS,
+      "authorize"
     );
     res.redirect(buildGithubAuthorizeUrl(stateToken));
   },
