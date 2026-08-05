@@ -171,6 +171,11 @@ function getAllowedLogins(): string[] {
     .filter((s) => s.length > 0);
 }
 
+/** Size of the login allowlist, for status output that must not name the users. */
+export function getAllowedLoginCount(): number {
+  return getAllowedLogins().length;
+}
+
 /** `@Nlma.io`, ` nlma.io. ` and `nlma.io` all normalize to `nlma.io`. */
 function normalizeDomain(raw: string): string {
   return raw

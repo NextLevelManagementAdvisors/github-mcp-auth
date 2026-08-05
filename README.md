@@ -64,6 +64,8 @@ Copy `.env.example` to `.env` and fill in. Required:
 
 Either one admits a user — they're OR'd, not AND'd. `GITHUB_ALLOWED_USERS` is for named individuals (contractors, a break-glass account); `GITHUB_APPROVED_EMAIL_DOMAINS` is for "everyone at these companies". With both empty, anyone with a GitHub account can authorize, as before.
 
+`GET /health` reports the resulting gate — `access_gate`, the normalized `approved_email_domains`, and `allowed_login_count` — so you can confirm what's actually loaded rather than what you meant to set. The domains are listed (they're already public on the splash page); the logins are only counted, never named.
+
 Only **verified** GitHub emails count toward a domain match — an unverified address proves nothing, since anyone can type `someone@your-company.com` into their GitHub profile. If a domain gate is configured and the grant can't read email addresses at all (missing `user:email`), authorization **fails closed** and tells the user to re-authorize.
 
 ## Deployment
@@ -128,8 +130,13 @@ That's it. claude.ai handles the OAuth dance; the user is redirected to GitHub t
 curl -s https://github.nlma.io/.well-known/oauth-protected-resource | jq .
 curl -s https://github.nlma.io/.well-known/oauth-authorization-server | jq .
 
-# Health
-curl -s https://github.nlma.io/health
+# Health — also reports which allowlists are live:
+#   {"status":"ok","server":"github-mcp-auth","access_gate":"allowlisted",
+#    "approved_email_domains":["nlma.io","fidumcompany.com"],"allowed_login_count":1}
+# `access_gate` is "open" when neither allowlist is configured. Check this after
+# a deploy: `npm run deploy` does not touch the VPS .env, so an unset
+# GITHUB_APPROVED_EMAIL_DOMAINS shows up here as an empty list.
+curl -s https://github.nlma.io/health | jq .
 
 # Without a bearer, /mcp must 401 with a WWW-Authenticate header
 curl -i https://github.nlma.io/mcp -X POST -H 'Content-Type: application/json' \

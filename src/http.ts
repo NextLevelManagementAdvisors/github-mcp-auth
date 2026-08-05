@@ -6,6 +6,7 @@ import { oauthProvider, mintAuthCode } from "./oauth.js";
 import {
   buildGithubAuthorizeUrl,
   completeGithubLogin,
+  getAllowedLoginCount,
   getApprovedEmailDomains,
   identifyGithubUser,
   revokeGithubGrant,
@@ -25,8 +26,20 @@ export function buildApp(): express.Express {
   app.use(express.json({ limit: "10mb" }));
   app.use(express.urlencoded({ extended: false }));
 
+  // Reports who may connect as well as whether we're up — a gateway that is
+  // healthy but gating the wrong set of people is the failure worth catching.
+  // The domains are already public on the splash page, so listing them is no
+  // new disclosure; the login allowlist is only counted, never named.
   app.get("/health", (_req, res) => {
-    res.json({ status: "ok", server: "github-mcp-auth" });
+    const approvedEmailDomains = getApprovedEmailDomains();
+    const allowedLoginCount = getAllowedLoginCount();
+    res.json({
+      status: "ok",
+      server: "github-mcp-auth",
+      access_gate: approvedEmailDomains.length > 0 || allowedLoginCount > 0 ? "allowlisted" : "open",
+      approved_email_domains: approvedEmailDomains,
+      allowed_login_count: allowedLoginCount,
+    });
   });
 
   app.get("/", (_req, res) => {
