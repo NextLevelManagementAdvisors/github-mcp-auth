@@ -3,6 +3,7 @@ import { config as loadEnv } from "dotenv";
 loadEnv();
 import { listen } from "./http.js";
 import { runMigrations } from "./db.js";
+import { startDomainsRegistrySync } from "./domains-registry.js";
 
 for (const required of [
   "DATABASE_URL",
@@ -24,8 +25,9 @@ if (salt.length < 32) {
 }
 
 runMigrations()
+  .then(() => startDomainsRegistrySync())
   .then(() => listen())
   .catch((err) => {
-    console.error("Failed to run migrations:", err);
+    console.error("Failed to start:", err);
     process.exit(1);
   });

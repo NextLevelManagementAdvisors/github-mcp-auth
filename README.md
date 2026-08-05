@@ -58,17 +58,24 @@ Copy `.env.example` to `.env` and fill in. Required:
 | `GITHUB_SCOPES`          | Default `repo,read:org,read:user,user:email,read:project,workflow`. `workflow` is required to create/update `.github/workflows/*` files; `user:email` is required to read verified emails for `GITHUB_APPROVED_EMAIL_DOMAINS`. Bump if a tool needs more. |
 | `UPSTREAM_MCP_URL`       | Default `http://127.0.0.1:3060` — the github-mcp-server docker container.                              |
 | `GITHUB_ALLOWED_USERS`   | Optional CSV allowlist of GitHub logins. Empty = no login gate.                                        |
-| `GITHUB_APPROVED_EMAIL_DOMAINS` | CSV of approved email domains; ships as `nlma.io`. A user is admitted when one of their **verified** GitHub emails is on an approved domain. Matching runs downward only — `nlma.io` admits `me@nlma.io`, `me@status.nlma.io` and `me@eu.status.nlma.io`; listing `status.nlma.io` instead would admit the subdomains but **not** the parent `me@nlma.io`. Empty = no domain gate. |
+| `GITHUB_APPROVED_EMAIL_DOMAINS` | Optional CSV of *additional* approved email domains, layered on top of the org-wide registry below. Most deployments leave this empty. |
+| `NLMA_AUTHORIZED_DOMAINS_URL` | Org-wide authorized-domains registry, synced at boot and every 5 minutes. Defaults to `https://status.nlma.io/domains.json` — override only for local dev or if the registry moves. |
 
-### How the two allowlists compose
+### Three allowlists, OR'd together
 
-Either one admits a user — they're OR'd, not AND'd. `GITHUB_ALLOWED_USERS` is for named individuals (contractors, a break-glass account); `GITHUB_APPROVED_EMAIL_DOMAINS` is for "everyone at these domains". With both empty, anyone with a GitHub account can authorize.
+Any of the three admits a user — none are AND'd:
 
-`.env.example` ships `GITHUB_APPROVED_EMAIL_DOMAINS=nlma.io`, so a fresh deploy is gated by default rather than open, and covers every `*.nlma.io` subdomain (`status.nlma.io` included) as well as the bare domain. Add more domains as you onboard them, and confirm the live value with `/health` — `npm run deploy` never overwrites the VPS `.env`, so an older deployment keeps whatever it already had.
+- **`NLMA_AUTHORIZED_DOMAINS_URL`** — the shared source of truth: an org-wide list of approved email domains, maintained once at `status.nlma.io` and consumed by every OAuth sidecar on the VPS (this gateway included), not just this repo. Synced automatically; nothing to configure for the common case.
+- **`GITHUB_APPROVED_EMAIL_DOMAINS`** — a local *addition* to the registry, for a domain that's approved for this connector specifically but not (yet, or ever) org-wide.
+- **`GITHUB_ALLOWED_USERS`** — named individuals: contractors, a break-glass account, anyone whose email domain isn't the point.
 
-`GET /health` reports the resulting gate — `access_gate`, the normalized `approved_email_domains`, and `allowed_login_count` — so you can confirm what's actually loaded rather than what you meant to set. The domains are listed (they're already public on the splash page); the logins are only counted, never named.
+A user is admitted when one of their **verified** GitHub emails matches an approved domain (registry ∪ local, deduped), or their login is on `GITHUB_ALLOWED_USERS`. Domain matching runs downward only — `nlma.io` admits `me@nlma.io`, `me@status.nlma.io` and `me@eu.status.nlma.io`; listing `status.nlma.io` instead would admit the subdomains but **not** the parent `me@nlma.io`. With all three empty, anyone with a GitHub account can authorize.
+
+`GET /health` reports the resulting gate: `access_gate`, the merged `approved_email_domains`, `allowed_login_count`, and a `domains_registry` block (`synced`, `domain_count`, `last_synced_at`, `last_error`) — so you can confirm what's actually loaded and whether the last sync succeeded, rather than what you meant to set. Domains are listed (the registry itself calls the list "not secret," and the splash page already shows it); the login allowlist is only counted, never named.
 
 Only **verified** GitHub emails count toward a domain match — an unverified address proves nothing, since anyone can type `someone@your-company.com` into their GitHub profile. If a domain gate is configured and the grant can't read email addresses at all (missing `user:email`), authorization **fails closed** and tells the user to re-authorize.
+
+**The registry sync degrades safely.** A failed fetch — the endpoint down, a timeout, a malformed response — never clears the last known-good list and never opens the gate; it logs and keeps serving what it last had (`domains_registry.last_error` in `/health` will show it). The very first fetch is awaited at boot, so the gate is populated before the server accepts its first request; if that first fetch itself fails (e.g. `status.nlma.io` is down exactly at cold start), the registry starts empty and effective gating falls back to whatever `GITHUB_APPROVED_EMAIL_DOMAINS` / `GITHUB_ALLOWED_USERS` provide locally — the same behavior this gateway had before the registry existed.
 
 ## Deployment
 
@@ -132,12 +139,18 @@ That's it. claude.ai handles the OAuth dance; the user is redirected to GitHub t
 curl -s https://github.nlma.io/.well-known/oauth-protected-resource | jq .
 curl -s https://github.nlma.io/.well-known/oauth-authorization-server | jq .
 
-# Health — also reports which allowlists are live:
+# Health — reports which allowlists are live, including the org-wide registry sync:
 #   {"status":"ok","server":"github-mcp-auth","access_gate":"allowlisted",
-#    "approved_email_domains":["nlma.io"],"allowed_login_count":1}
-# `access_gate` is "open" when neither allowlist is configured. Check this after
-# a deploy: `npm run deploy` does not touch the VPS .env, so an unset
-# GITHUB_APPROVED_EMAIL_DOMAINS shows up here as an empty list.
+#    "approved_email_domains":["aristidemanagement.com","fidumcompany.com","hvacfrontroyal.com",
+#      "mattmirus.com","nextlevelmanagementadvisors.com","nlma.io","propmanageplus.com",
+#      "tra-lawfirm.com","zipadeeservices.com"],
+#    "allowed_login_count":1,
+#    "domains_registry":{"url":"https://status.nlma.io/domains.json","synced":true,
+#      "domain_count":9,"last_synced_at":"2026-07-28T15:39:32.000Z","last_error":null}}
+# `access_gate` is "open" only if the registry sync has never succeeded AND both
+# local allowlists are empty. `domains_registry.last_error` is set (and the list
+# stays whatever it last was) if a poll fails — check this after a deploy, since
+# `npm run deploy` does not touch the VPS .env for GITHUB_APPROVED_EMAIL_DOMAINS.
 curl -s https://github.nlma.io/health | jq .
 
 # Without a bearer, /mcp must 401 with a WWW-Authenticate header
@@ -160,12 +173,15 @@ See `migrations/001_initial.sql`, `002_oauth.sql`, `003_offboarding.sql`. Notabl
 - `oauth_access_tokens` — opaque tokens issued to claude.ai. Points at `github_users.github_user_id`.
 - `oauth_pending_state` — short-lived rows for in-flight GitHub OAuth dances; carries the claude.ai PKCE challenge across the GitHub redirect. `purpose` is `authorize` or `disconnect`; a `disconnect` row has no client/PKCE columns because there's no MCP client on the other side.
 
+The org-wide domains registry (`domains-registry.ts`) is deliberately **not** persisted — it's an in-memory cache of a remote list that resyncs every 5 minutes and again on every restart, so a database row would only ever be a snapshot no more trustworthy than the live fetch.
+
 ## Security notes
 
 - GitHub tokens are AES-256-GCM-encrypted at rest. Key is HKDF-derived from `API_KEY_HASH_SALT` with a distinct info label.
 - Tokens issued to claude.ai are opaque UUIDs; nothing about the GitHub user is recoverable from them without the database.
 - `tenants.tenant_id_hash` is a salted SHA-256 of the GitHub user id, so audit logs don't directly expose user ids.
-- `GITHUB_ALLOWED_USERS` and `GITHUB_APPROVED_EMAIL_DOMAINS` provide deny-by-default modes; only verified GitHub emails satisfy the domain gate, and a configured domain gate fails closed when emails can't be read.
+- `GITHUB_ALLOWED_USERS`, `GITHUB_APPROVED_EMAIL_DOMAINS`, and the `NLMA_AUTHORIZED_DOMAINS_URL` registry sync together provide deny-by-default modes; only verified GitHub emails satisfy a domain gate, and a configured domain gate fails closed when emails can't be read.
+- The registry endpoint (`/domains.json` on `status.nlma.io`) is public and unauthenticated by design — its own nginx config says so ("the list is not secret"). Don't add auth to the request this gateway makes to it; that would just mean this gateway breaks when the registry's auth story changes, for a list that was never secret.
 - Users can revoke themselves — see [Turning a connector off](#turning-a-connector-off).
 - Revoke a user as admin: `DELETE FROM github_users WHERE github_login = '...'` cascades effectively (their opaque tokens won't resolve, and proxy requests will 401). Unlike `/disconnect`, this leaves the OAuth App grant in place on GitHub's side.
 ## License

@@ -14,6 +14,7 @@ import {
 import { offboardGithubUser, storePendingState, takePendingState } from "./db.js";
 import type { OffboardResult } from "./db.js";
 import { buildMcpProxy } from "./proxy.js";
+import { getRegistryStatus } from "./domains-registry.js";
 
 const PORT = parseInt(process.env.PORT ?? "3061", 10);
 const HOST = process.env.HOST ?? "127.0.0.1";
@@ -28,17 +29,26 @@ export function buildApp(): express.Express {
 
   // Reports who may connect as well as whether we're up — a gateway that is
   // healthy but gating the wrong set of people is the failure worth catching.
-  // The domains are already public on the splash page, so listing them is no
-  // new disclosure; the login allowlist is only counted, never named.
+  // The domains are already public (the org registry says so itself, and the
+  // splash page lists them too), so echoing them is no new disclosure; the
+  // login allowlist is only counted, never named.
   app.get("/health", (_req, res) => {
     const approvedEmailDomains = getApprovedEmailDomains();
     const allowedLoginCount = getAllowedLoginCount();
+    const registry = getRegistryStatus();
     res.json({
       status: "ok",
       server: "github-mcp-auth",
       access_gate: approvedEmailDomains.length > 0 || allowedLoginCount > 0 ? "allowlisted" : "open",
       approved_email_domains: approvedEmailDomains,
       allowed_login_count: allowedLoginCount,
+      domains_registry: {
+        url: registry.url,
+        synced: registry.syncedOnce,
+        domain_count: registry.domains.length,
+        last_synced_at: registry.lastSyncedAt,
+        last_error: registry.lastError,
+      },
     });
   });
 

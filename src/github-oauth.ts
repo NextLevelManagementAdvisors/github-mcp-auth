@@ -2,6 +2,7 @@
 // persists the resulting access (and refresh) token in github_users.
 
 import { upsertGithubUser, loadGithubUser } from "./db.js";
+import { getRegistryDomains } from "./domains-registry.js";
 
 const GH_AUTH_URL = "https://github.com/login/oauth/authorize";
 const GH_TOKEN_URL = "https://github.com/login/oauth/access_token";
@@ -186,12 +187,18 @@ function normalizeDomain(raw: string): string {
     .replace(/\.+$/, "");
 }
 
-/** CSV of email domains that may use this connector. Empty = no domain gate. */
+/**
+ * Approved email domains, from two sources OR'd together: the local
+ * GITHUB_APPROVED_EMAIL_DOMAINS env var, and the org-wide registry synced
+ * from status.nlma.io (see domains-registry.ts). Empty = no domain gate.
+ */
 export function getApprovedEmailDomains(): string[] {
-  return (process.env.GITHUB_APPROVED_EMAIL_DOMAINS ?? "")
+  const local = (process.env.GITHUB_APPROVED_EMAIL_DOMAINS ?? "")
     .split(",")
     .map(normalizeDomain)
     .filter((s) => s.length > 0);
+  const registry = getRegistryDomains().map(normalizeDomain).filter((s) => s.length > 0);
+  return Array.from(new Set([...local, ...registry]));
 }
 
 /** An address is approved when its domain matches an entry or is a subdomain of one. */
