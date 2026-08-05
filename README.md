@@ -58,11 +58,13 @@ Copy `.env.example` to `.env` and fill in. Required:
 | `GITHUB_SCOPES`          | Default `repo,read:org,read:user,user:email,read:project,workflow`. `workflow` is required to create/update `.github/workflows/*` files; `user:email` is required to read verified emails for `GITHUB_APPROVED_EMAIL_DOMAINS`. Bump if a tool needs more. |
 | `UPSTREAM_MCP_URL`       | Default `http://127.0.0.1:3060` — the github-mcp-server docker container.                              |
 | `GITHUB_ALLOWED_USERS`   | Optional CSV allowlist of GitHub logins. Empty = no login gate.                                        |
-| `GITHUB_APPROVED_EMAIL_DOMAINS` | Optional CSV of approved email domains, e.g. `nlma.io,fidumcompany.com,fsbt.io`. A user is admitted when one of their **verified** GitHub emails is on an approved domain (subdomains count: `nlma.io` admits `me@mail.nlma.io`). Empty = no domain gate. |
+| `GITHUB_APPROVED_EMAIL_DOMAINS` | CSV of approved email domains; ships as `status.nlma.io`. A user is admitted when one of their **verified** GitHub emails is on an approved domain. Matching runs downward only — `status.nlma.io` admits `me@status.nlma.io` and `me@eu.status.nlma.io`, but **not** `me@nlma.io`; add the parent to the list if those should get in. Empty = no domain gate. |
 
 ### How the two allowlists compose
 
-Either one admits a user — they're OR'd, not AND'd. `GITHUB_ALLOWED_USERS` is for named individuals (contractors, a break-glass account); `GITHUB_APPROVED_EMAIL_DOMAINS` is for "everyone at these companies". With both empty, anyone with a GitHub account can authorize, as before.
+Either one admits a user — they're OR'd, not AND'd. `GITHUB_ALLOWED_USERS` is for named individuals (contractors, a break-glass account); `GITHUB_APPROVED_EMAIL_DOMAINS` is for "everyone at these domains". With both empty, anyone with a GitHub account can authorize.
+
+`.env.example` ships `GITHUB_APPROVED_EMAIL_DOMAINS=status.nlma.io`, so a fresh deploy is gated by default rather than open. Add more domains as you onboard them, and confirm the live value with `/health` — `npm run deploy` never overwrites the VPS `.env`, so an older deployment keeps whatever it already had.
 
 `GET /health` reports the resulting gate — `access_gate`, the normalized `approved_email_domains`, and `allowed_login_count` — so you can confirm what's actually loaded rather than what you meant to set. The domains are listed (they're already public on the splash page); the logins are only counted, never named.
 
@@ -132,7 +134,7 @@ curl -s https://github.nlma.io/.well-known/oauth-authorization-server | jq .
 
 # Health — also reports which allowlists are live:
 #   {"status":"ok","server":"github-mcp-auth","access_gate":"allowlisted",
-#    "approved_email_domains":["nlma.io","fidumcompany.com"],"allowed_login_count":1}
+#    "approved_email_domains":["status.nlma.io"],"allowed_login_count":1}
 # `access_gate` is "open" when neither allowlist is configured. Check this after
 # a deploy: `npm run deploy` does not touch the VPS .env, so an unset
 # GITHUB_APPROVED_EMAIL_DOMAINS shows up here as an empty list.
