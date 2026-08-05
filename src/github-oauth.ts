@@ -6,6 +6,7 @@ import { upsertGithubUser, loadGithubUser } from "./db.js";
 const GH_AUTH_URL = "https://github.com/login/oauth/authorize";
 const GH_TOKEN_URL = "https://github.com/login/oauth/access_token";
 const GH_USER_URL = "https://api.github.com/user";
+const GH_USER_EMAILS_URL = "https://api.github.com/user/emails";
 
 function getEnv(name: string): string {
   const v = process.env[name];
@@ -14,7 +15,8 @@ function getEnv(name: string): string {
 }
 
 export function getGithubScopes(): string[] {
-  const raw = process.env.GITHUB_SCOPES ?? "repo,read:org,read:user,read:project,workflow";
+  const raw =
+    process.env.GITHUB_SCOPES ?? "repo,read:org,read:user,user:email,read:project,workflow";
   return raw
     .split(",")
     .map((s) => s.trim())
@@ -87,6 +89,58 @@ export async function fetchGithubUser(accessToken: string): Promise<GithubUserRe
   return (await res.json()) as GithubUserResponse;
 }
 
+export interface GithubEmail {
+  email: string;
+  primary: boolean;
+  verified: boolean;
+}
+
+/** Thrown when the grant can't read email addresses — i.e. it lacks `user:email`. */
+export class GithubEmailScopeError extends Error {}
+
+export async function fetchGithubEmails(accessToken: string): Promise<GithubEmail[]> {
+  const res = await fetch(GH_USER_EMAILS_URL, {
+    headers: {
+      Accept: "application/vnd.github+json",
+      "User-Agent": "github-mcp-auth",
+      Authorization: `Bearer ${accessToken}`,
+      "X-GitHub-Api-Version": "2022-11-28",
+    },
+  });
+  if (res.status === 403 || res.status === 404) {
+    throw new GithubEmailScopeError(
+      "this authorization cannot read your email addresses — it is missing the user:email scope"
+    );
+  }
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`GitHub /user/emails lookup failed: HTTP ${res.status}: ${body}`);
+  }
+  return (await res.json()) as GithubEmail[];
+}
+
+/**
+ * Revoke the OAuth App grant on GitHub's side so a disconnected connector is
+ * genuinely off rather than merely forgotten locally. Best-effort: callers
+ * still delete local state when this returns false.
+ */
+export async function revokeGithubGrant(accessToken: string): Promise<boolean> {
+  const clientId = getEnv("GITHUB_CLIENT_ID");
+  const basic = Buffer.from(`${clientId}:${getEnv("GITHUB_CLIENT_SECRET")}`).toString("base64");
+  const res = await fetch(`https://api.github.com/applications/${clientId}/grant`, {
+    method: "DELETE",
+    headers: {
+      Accept: "application/vnd.github+json",
+      "User-Agent": "github-mcp-auth",
+      Authorization: `Basic ${basic}`,
+      "Content-Type": "application/json",
+      "X-GitHub-Api-Version": "2022-11-28",
+    },
+    body: JSON.stringify({ access_token: accessToken }),
+  });
+  return res.status === 204;
+}
+
 export async function refreshGithubToken(refreshToken: string): Promise<GithubTokenResponse> {
   const res = await fetch(GH_TOKEN_URL, {
     method: "POST",
@@ -110,15 +164,139 @@ export async function refreshGithubToken(refreshToken: string): Promise<GithubTo
   return data;
 }
 
-function isUserAllowed(login: string): boolean {
-  const raw = process.env.GITHUB_ALLOWED_USERS;
-  if (!raw) return true;
-  const allow = raw
+function getAllowedLogins(): string[] {
+  return (process.env.GITHUB_ALLOWED_USERS ?? "")
     .split(",")
     .map((s) => s.trim().toLowerCase())
     .filter((s) => s.length > 0);
-  if (allow.length === 0) return true;
-  return allow.includes(login.toLowerCase());
+}
+
+/** `@Nlma.io`, ` nlma.io. ` and `nlma.io` all normalize to `nlma.io`. */
+function normalizeDomain(raw: string): string {
+  return raw
+    .trim()
+    .toLowerCase()
+    .replace(/^@+/, "")
+    .replace(/^\.+/, "")
+    .replace(/\.+$/, "");
+}
+
+/** CSV of email domains that may use this connector. Empty = no domain gate. */
+export function getApprovedEmailDomains(): string[] {
+  return (process.env.GITHUB_APPROVED_EMAIL_DOMAINS ?? "")
+    .split(",")
+    .map(normalizeDomain)
+    .filter((s) => s.length > 0);
+}
+
+/** An address is approved when its domain matches an entry or is a subdomain of one. */
+export function isEmailDomainApproved(email: string, approved: string[]): boolean {
+  const at = email.lastIndexOf("@");
+  if (at < 0) return false;
+  const domain = normalizeDomain(email.slice(at + 1));
+  if (!domain) return false;
+  return approved.some((d) => domain === d || domain.endsWith(`.${d}`));
+}
+
+/**
+ * Only *verified* addresses count. An unverified one proves nothing — anyone
+ * could add `someone@your-company.com` to their GitHub account and walk in.
+ * Primary first, so the stored email is the user's own idea of their identity.
+ */
+function verifiedEmails(emails: GithubEmail[]): string[] {
+  const usable = emails.filter((e) => e.verified && e.email);
+  return [...usable.filter((e) => e.primary), ...usable.filter((e) => !e.primary)].map(
+    (e) => e.email
+  );
+}
+
+interface AccessDecision {
+  allowed: boolean;
+  /** Verified email to store on the user row — the approving one when there is one. */
+  email: string | null;
+  /** Human-readable justification, surfaced to the user on denial. */
+  reason: string;
+}
+
+/**
+ * Two independent allowlists, either of which admits a user: the per-login
+ * `GITHUB_ALLOWED_USERS` and the per-domain `GITHUB_APPROVED_EMAIL_DOMAINS`.
+ * Both empty = anyone with a GitHub account, as before.
+ */
+async function decideAccess(accessToken: string, login: string): Promise<AccessDecision> {
+  const logins = getAllowedLogins();
+  const domains = getApprovedEmailDomains();
+  const onLoginList = logins.includes(login.toLowerCase());
+
+  // Fetched even with no domain gate configured: the email is stored on the
+  // user row and shown back during offboarding.
+  let emails: GithubEmail[] | null = null;
+  let emailError: string | null = null;
+  try {
+    emails = await fetchGithubEmails(accessToken);
+  } catch (err) {
+    emailError = err instanceof Error ? err.message : "email lookup failed";
+  }
+  const verified = emails ? verifiedEmails(emails) : [];
+  const approvingEmail = verified.find((e) => isEmailDomainApproved(e, domains)) ?? null;
+  const primaryEmail = verified[0] ?? null;
+
+  if (logins.length === 0 && domains.length === 0) {
+    return { allowed: true, email: primaryEmail, reason: "no allowlist configured" };
+  }
+  if (onLoginList) {
+    return { allowed: true, email: approvingEmail ?? primaryEmail, reason: "GITHUB_ALLOWED_USERS" };
+  }
+  if (domains.length === 0) {
+    return { allowed: false, email: primaryEmail, reason: "not on GITHUB_ALLOWED_USERS" };
+  }
+  if (approvingEmail) {
+    return { allowed: true, email: approvingEmail, reason: "approved email domain" };
+  }
+  // A domain gate is configured, so an unreadable email list must fail closed.
+  if (emailError) {
+    return {
+      allowed: false,
+      email: null,
+      reason: `${emailError} — re-authorize to grant it`,
+    };
+  }
+  return {
+    allowed: false,
+    email: primaryEmail,
+    reason: `no verified GitHub email on an approved domain (${domains.join(", ")})`,
+  };
+}
+
+export interface GithubIdentity {
+  githubUserId: number;
+  githubLogin: string;
+  /** Verified email we know them by, when GitHub let us read one. */
+  email: string | null;
+}
+
+/**
+ * Exchange a GitHub `code` for an identity *without* persisting anything.
+ * The offboarding flow needs to prove who is asking, but must not store
+ * credentials for an account whose row it is about to delete.
+ */
+export async function identifyGithubUser(
+  code: string
+): Promise<GithubIdentity & { accessToken: string }> {
+  const tok = await exchangeCodeForToken(code);
+  const user = await fetchGithubUser(tok.access_token);
+  let email: string | null = null;
+  try {
+    email = verifiedEmails(await fetchGithubEmails(tok.access_token))[0] ?? null;
+  } catch {
+    // Identity is the login; the email is only used to label the page.
+  }
+  return {
+    githubUserId: user.id,
+    githubLogin: user.login,
+    email,
+    accessToken: tok.access_token,
+  };
 }
 
 /**
@@ -126,14 +304,12 @@ function isUserAllowed(login: string): boolean {
  * token, fetch the user, persist the encrypted token, and return the
  * github_user_id we'll use to look it up at proxy time.
  */
-export async function completeGithubLogin(code: string): Promise<{
-  githubUserId: number;
-  githubLogin: string;
-}> {
+export async function completeGithubLogin(code: string): Promise<GithubIdentity> {
   const tok = await exchangeCodeForToken(code);
   const user = await fetchGithubUser(tok.access_token);
-  if (!isUserAllowed(user.login)) {
-    throw new Error(`GitHub user ${user.login} is not on the allowlist`);
+  const decision = await decideAccess(tok.access_token, user.login);
+  if (!decision.allowed) {
+    throw new Error(`GitHub user ${user.login} is not allowed to use this connector: ${decision.reason}`);
   }
   const now = Date.now();
   const accessExpiresAt = tok.expires_in ? new Date(now + tok.expires_in * 1000) : null;
@@ -148,9 +324,10 @@ export async function completeGithubLogin(code: string): Promise<{
     accessExpiresAt,
     tok.refresh_token ?? null,
     refreshExpiresAt,
-    scopes
+    scopes,
+    decision.email
   );
-  return { githubUserId: user.id, githubLogin: user.login };
+  return { githubUserId: user.id, githubLogin: user.login, email: decision.email };
 }
 
 /**
@@ -188,7 +365,8 @@ export async function getValidAccessTokenFor(githubUserId: number): Promise<{
       accessExpiresAt,
       tok.refresh_token ?? u.refreshToken,
       refreshExpiresAt,
-      scopes
+      scopes,
+      u.email
     );
     return { accessToken: tok.access_token, githubLogin: u.githubLogin };
   } catch (err) {

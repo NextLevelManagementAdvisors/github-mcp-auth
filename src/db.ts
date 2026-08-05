@@ -69,6 +69,7 @@ export interface GithubUserTokens {
   refreshExpiresAt: Date | null;
   scopes: string[];
   githubLogin: string;
+  email: string | null;
 }
 
 export async function upsertGithubUser(
@@ -78,7 +79,8 @@ export async function upsertGithubUser(
   accessExpiresAt: Date | null,
   refreshToken: string | null,
   refreshExpiresAt: Date | null,
-  scopes: string[]
+  scopes: string[],
+  email: string | null
 ): Promise<void> {
   const enc = encryptToken(accessToken);
   const refEnc = refreshToken ? encryptToken(refreshToken) : null;
@@ -87,8 +89,8 @@ export async function upsertGithubUser(
        (github_user_id, github_login,
         access_ciphertext, access_iv, access_tag, access_expires_at,
         refresh_ciphertext, refresh_iv, refresh_tag, refresh_expires_at,
-        scopes, updated_at)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, NOW())
+        scopes, email, updated_at)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12, NOW())
      ON CONFLICT (github_user_id) DO UPDATE SET
        github_login = EXCLUDED.github_login,
        access_ciphertext = EXCLUDED.access_ciphertext,
@@ -100,6 +102,8 @@ export async function upsertGithubUser(
        refresh_tag = EXCLUDED.refresh_tag,
        refresh_expires_at = EXCLUDED.refresh_expires_at,
        scopes = EXCLUDED.scopes,
+       -- A token refresh doesn't look the email up, so never let it blank one out.
+       email = COALESCE(EXCLUDED.email, github_users.email),
        updated_at = NOW()`,
     [
       githubUserId,
@@ -107,6 +111,7 @@ export async function upsertGithubUser(
       enc.ciphertext, enc.iv, enc.tag, accessExpiresAt,
       refEnc?.ciphertext ?? null, refEnc?.iv ?? null, refEnc?.tag ?? null, refreshExpiresAt,
       scopes,
+      email,
     ]
   );
 }
@@ -122,6 +127,7 @@ interface GhUserRow {
   refresh_tag: Buffer | null;
   refresh_expires_at: Date | null;
   scopes: string[];
+  email: string | null;
 }
 
 export async function loadGithubUser(githubUserId: number): Promise<GithubUserTokens | null> {
@@ -129,7 +135,7 @@ export async function loadGithubUser(githubUserId: number): Promise<GithubUserTo
     `SELECT github_login,
             access_ciphertext, access_iv, access_tag, access_expires_at,
             refresh_ciphertext, refresh_iv, refresh_tag, refresh_expires_at,
-            scopes
+            scopes, email
      FROM github_users
      WHERE github_user_id = $1`,
     [githubUserId]
@@ -154,46 +160,107 @@ export async function loadGithubUser(githubUserId: number): Promise<GithubUserTo
     refreshExpiresAt: row.refresh_expires_at,
     scopes: row.scopes,
     githubLogin: row.github_login,
+    email: row.email,
   };
+}
+
+export interface OffboardResult {
+  /** False when there was no stored GitHub connection left to remove. */
+  hadStoredConnection: boolean;
+  accessTokensDeleted: number;
+  refreshTokensDeleted: number;
+  authCodesDeleted: number;
+}
+
+/**
+ * Turn a connector fully off for one GitHub user: every opaque token we issued
+ * to claude.ai, any in-flight auth code, the encrypted GitHub credentials, and
+ * the tenant row. `audit_log` is deliberately left alone — it is keyed by a
+ * salted hash rather than an identity, and an audit trail you can erase from
+ * the product isn't one.
+ */
+export async function offboardGithubUser(githubUserId: number): Promise<OffboardResult> {
+  const client = await getPool().connect();
+  try {
+    await client.query("BEGIN");
+    const access = await client.query(
+      `DELETE FROM oauth_access_tokens WHERE github_user_id = $1`,
+      [githubUserId]
+    );
+    const refresh = await client.query(
+      `DELETE FROM oauth_refresh_tokens WHERE github_user_id = $1`,
+      [githubUserId]
+    );
+    const codes = await client.query(`DELETE FROM oauth_auth_codes WHERE github_user_id = $1`, [
+      githubUserId,
+    ]);
+    const user = await client.query(`DELETE FROM github_users WHERE github_user_id = $1`, [
+      githubUserId,
+    ]);
+    await client.query(`DELETE FROM tenants WHERE github_user_id = $1`, [githubUserId]);
+    await client.query("COMMIT");
+    return {
+      hadStoredConnection: (user.rowCount ?? 0) > 0,
+      accessTokensDeleted: access.rowCount ?? 0,
+      refreshTokensDeleted: refresh.rowCount ?? 0,
+      authCodesDeleted: codes.rowCount ?? 0,
+    };
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 // ─── oauth_pending_state ────────────────────────────────────────────────────
 
+/** What the GitHub round trip this row guards is for. */
+export type PendingPurpose = "authorize" | "disconnect";
+
+export interface PendingState {
+  purpose: PendingPurpose;
+  /** Null on a "disconnect" dance — there is no claude.ai client involved. */
+  clientId: string | null;
+  redirectUri: string | null;
+  codeChallenge: string | null;
+  claudeState: string | null;
+}
+
 export async function storePendingState(
   stateToken: string,
-  clientId: string,
-  redirectUri: string,
-  codeChallenge: string,
+  clientId: string | null,
+  redirectUri: string | null,
+  codeChallenge: string | null,
   claudeState: string | undefined,
-  expiresAtMs: number
+  expiresAtMs: number,
+  purpose: PendingPurpose
 ): Promise<void> {
   await getPool().query(
-    `INSERT INTO oauth_pending_state (state_token, client_id, redirect_uri, code_challenge, claude_state, expires_at)
-     VALUES ($1, $2, $3, $4, $5, to_timestamp($6 / 1000.0))`,
-    [stateToken, clientId, redirectUri, codeChallenge, claudeState ?? null, expiresAtMs]
+    `INSERT INTO oauth_pending_state
+       (state_token, client_id, redirect_uri, code_challenge, claude_state, expires_at, purpose)
+     VALUES ($1, $2, $3, $4, $5, to_timestamp($6 / 1000.0), $7)`,
+    [stateToken, clientId, redirectUri, codeChallenge, claudeState ?? null, expiresAtMs, purpose]
   );
 }
 
-export async function takePendingState(stateToken: string): Promise<{
-  clientId: string;
-  redirectUri: string;
-  codeChallenge: string;
-  claudeState: string | null;
-} | null> {
+export async function takePendingState(stateToken: string): Promise<PendingState | null> {
   const r = await getPool().query<{
-    client_id: string;
-    redirect_uri: string;
-    code_challenge: string;
+    client_id: string | null;
+    redirect_uri: string | null;
+    code_challenge: string | null;
     claude_state: string | null;
+    purpose: string;
   }>(
     `DELETE FROM oauth_pending_state
      WHERE state_token = $1 AND expires_at > NOW()
-     RETURNING client_id, redirect_uri, code_challenge, claude_state`,
+     RETURNING client_id, redirect_uri, code_challenge, claude_state, purpose`,
     [stateToken]
   );
   if (r.rowCount === 0) return null;
   const row = r.rows[0];
   return {
+    purpose: row.purpose === "disconnect" ? "disconnect" : "authorize",
     clientId: row.client_id,
     redirectUri: row.redirect_uri,
     codeChallenge: row.code_challenge,
